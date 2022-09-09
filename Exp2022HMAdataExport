@@ -1,0 +1,218 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using cAlgo.API;
+using cAlgo.API.Collections;
+using cAlgo.API.Indicators;
+using cAlgo.API.Internals;
+
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace cAlgo.Robots
+{
+    [Robot(AccessRights = AccessRights.FullAccess)]
+    public class Exp2022HMAdataExport : Robot
+    {
+        // Export data via back test for RL training in python
+        
+        
+        [Parameter("ATR Length for SL/TP", DefaultValue = 4)] // ATR MA length
+        public int ATRlength { get; set; }
+        
+
+        [Parameter("HMA1 Period", DefaultValue = 20)]
+        public int Hma1period { get; set; }
+
+        [Parameter("HMA2 Period", DefaultValue = 50)]
+        public int Hma2period { get; set; }
+        
+        [Parameter("HMA3 Period", DefaultValue = 200)]
+        public int Hma3period { get; set; }
+        
+        [Parameter("HMA4 Period", DefaultValue = 1000)]
+        public int Hma4period { get; set; }
+
+
+       
+        // vars
+        public Position position;
+        public bool inTrade;
+        public string label = "Exp2022HMAdataExport";
+        public string symbol; // = Symbol.Name; moved to OnStart()
+        
+        
+        private AverageTrueRange  atr;//, atr100;
+        private TrueRange tr;
+        private HullMovingAverage hma1, hma2, hma3, hma4;
+        
+        double prevBarRange, prvPips, nominalSpread;
+        
+        List<(DateTime, double)> ticksTuplesList = new List<(DateTime, double)>();
+        
+        string chartText;
+        string fileName, dataRow, openTime;
+        
+        
+        int nTicks = 10; // number of ticks in moving window calculation
+        
+        protected override void OnStart()
+        {
+            symbol = Symbol.Name;
+            
+            // Average True Range indicators
+            //atr100 = Indicators.AverageTrueRange(100, MovingAverageType.Simple);
+            atr = Indicators.AverageTrueRange(ATRlength, MovingAverageType.Simple);
+            
+            // True Range indicator
+            tr = Indicators.TrueRange();
+            
+            // Hull Moving Average
+            hma1 = Indicators.HullMovingAverage(Bars.ClosePrices, Hma1period);
+            hma2 = Indicators.HullMovingAverage(Bars.ClosePrices, Hma2period);
+            hma3 = Indicators.HullMovingAverage(Bars.ClosePrices, Hma3period);
+            hma4 = Indicators.HullMovingAverage(Bars.ClosePrices, Hma4period);
+            
+            
+            // set inTrade flag true if position open (discovered in case robot restarts while in trade)
+            if( Positions.Find(label,symbol)!=null ) inTrade =true; 
+            
+            // does chart have enough bars to prime calculations
+            //if( Bars.Count < BarsBack ) Print("if( Bars.Count < BarsBack ) ");
+            
+        } // OnStart()
+
+
+
+
+        protected override void OnTick()
+        {
+            return;
+        } // OnTick()
+        
+        
+        
+        
+        protected override void OnBar()
+        {
+            // features for NN
+            // HMA calc.
+            // momentum
+            var hma1Moment =  hma1.Result.Last(1) - hma1.Result.Last(2); //prev bar/tick
+            var hma2Moment =  hma2.Result.Last(1) - hma2.Result.Last(2); //prev bar/tick
+            var hma3Moment =  hma3.Result.Last(1) - hma3.Result.Last(2); //prev bar/tick
+            var hma4Moment =  hma4.Result.Last(1) - hma4.Result.Last(2); //prev bar/tick
+            // deltas
+            var delH1H4 = hma1.Result.Last(1) - hma4.Result.Last(1); // prev bar
+            var delH1H2 = hma1.Result.Last(1) - hma2.Result.Last(1); 
+            var delH2H3 = hma2.Result.Last(1) - hma3.Result.Last(1); 
+            var delH3H4 = hma3.Result.Last(1) - hma4.Result.Last(1);
+            //delta ratios to total band width
+            var rH12H14 = delH1H2 / delH1H4;
+            var rH23H14 = delH2H3 / delH1H4;
+            var rH34H14 = delH3H4 / delH1H4;
+            // delta ratios between bands
+            var rH12H23 = delH1H2 / delH2H3;
+            var rH12H34 = delH1H2 / delH3H4;
+            var rH23H34 = delH2H3 / delH3H4;
+            
+            
+            
+            // volatility filter
+            prevBarRange = tr.Result.Last(1);  // Bars.HighPrices.Last(1)-Bars.LowPrices.Last(1);
+            prvPips = prevBarRange/Symbol.PipSize;
+            
+            
+            // Spike Efficiency Filter
+            var prevNetMovement = Math.Abs( Bars.ClosePrices.Last(1) - Bars.OpenPrices.Last(1) );
+            var prevEfficiency  = prevNetMovement / prevBarRange;
+           
+            
+            
+            // calculate % change of TR over ATR10
+            var myATR = atr.Result.Last(1);
+            var pctChgRange = 100 * (prevBarRange - myATR) / myATR;
+            
+
+
+            
+            // data storage file
+            fileName = "C:\\Users\\a\\Desktop\\cBot_Datafile\\exportedData\\"+symbol+"_tick_data_to_";
+            
+            
+            // write data to file
+            if (!File.Exists(fileName)) { 
+                // if file does not exist, create one with a header
+                string dataColumns = 
+                "datetime" + "," +
+                "bid" + "," +
+                "nominalSpread"  + "," +
+                "hma1Moment" + "," + 
+                "hma2Moment"  + "," +
+                "hma3Moment"  + "," +
+                "hma4Moment"  + "," +
+                "delH1H4"  + "," +
+                "delH1H2"  + "," +
+                "delH2H3"  + "," +
+                "delH3H4"  + "," +
+                "rH12H14"  + "," +
+                "rH23H14"  + "," +
+                "rH34H14"  + "," +
+                "rH12H23"  + "," +
+                "rH12H34"  + "," +
+                "rH23H34"  +
+                Environment.NewLine;
+                File.WriteAllText(fileName, dataColumns);
+            }
+           
+           
+            
+            openTime = Bars.OpenTimes.Last(1).ToString("yyyyMMddHHmmss.FFF");
+            nominalSpread = Symbol.Ask - Symbol.Bid;
+            dataRow =
+            openTime + "," + Bid.ToString() + "," + nominalSpread.ToString() + "," +            
+            hma1Moment.ToString() + "," + 
+            hma2Moment.ToString() + "," +
+            hma3Moment.ToString() + "," +
+            hma4Moment.ToString() + "," +
+            delH1H4.ToString() + "," +
+            delH1H2.ToString() + "," +
+            delH2H3.ToString() + "," +
+            delH3H4.ToString() + "," +
+            rH12H14.ToString() + "," +
+            rH23H14.ToString() + "," +
+            rH34H14.ToString() + "," +
+            rH12H23.ToString() + "," +
+            rH12H34.ToString() + "," +
+            rH23H34.ToString() +
+            Environment.NewLine;
+           
+            
+            // append new data to file
+            File.AppendAllText(fileName, dataRow);
+
+            return; // capture data and skip trading
+            
+            
+        } // OnBar()
+        
+        
+        protected override void OnStop()
+        {
+            // Handle cBot stop here
+            // rename file
+            
+            var oldFileName = fileName;
+            
+            fileName = fileName + openTime +".csv";
+            System.IO.File.Move(oldFileName, fileName);
+            
+                        
+        }
+        
+        
+        
+    } // cBot         
+} // namespace
